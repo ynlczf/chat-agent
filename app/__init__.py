@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from dotenv import load_dotenv
 
-from .agent_setup import create_agent
+from .agent_setup import create_agent, _ensure_agents_memory, _remove_per_user_agents_memory
 from .config import DB_URI, SANDBOX_IMAGE
 from .routes import router, set_globals
 from .sandbox import init_sandbox_manager
@@ -45,6 +45,13 @@ async def lifespan(app: FastAPI):
 
         _agent = create_agent(_checkpointer, _store)
         set_globals(_store, _checkpointer, _agent)
+
+        # AGENTS.md 是全局配置：启动时确保唯一一份存在，并清理历史遗留的按用户副本
+        try:
+            _ensure_agents_memory(_store)
+            _remove_per_user_agents_memory(_store)
+        except Exception as e:
+            logger.warning(f"Failed to seed AGENTS.md at startup: {e}", exc_info=True)
 
         logger.info("Application started successfully.")
         yield

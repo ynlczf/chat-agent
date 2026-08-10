@@ -130,28 +130,28 @@ class FileHandler:
 
         code = f'''import csv, json
 
-filepath = "{filepath}"
-
-with open(filepath, "r", encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    rows = list(reader)
-
-# 基本统计
-stats = {{
-    "行数": len(rows),
-    "列名": list(rows[0].keys()) if rows else [],
-}}
-
-# 缺失值统计
-if rows:
-    missing = {{}}
-    for col in rows[0].keys():
-        nulls = sum(1 for r in rows if not r.get(col))
-        if nulls > 0:
-            missing[col] = nulls
-    if missing:
-        stats["缺失值统计"] = missing
-
-print(json.dumps(stats, ensure_ascii=False, indent=2))'''
+            filepath = "{filepath}"
+            
+            with open(filepath, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+            
+            # 基本统计
+            stats = {{
+                "行数": len(rows),
+                "列名": list(rows[0].keys()) if rows else [],
+            }}
+            
+            # 缺失值统计
+            if rows:
+                missing = {{}}
+                for col in rows[0].keys():
+                    nulls = sum(1 for r in rows if not r.get(col))
+                    if nulls > 0:
+                        missing[col] = nulls
+                if missing:
+                    stats["缺失值统计"] = missing
+            
+            print(json.dumps(stats, ensure_ascii=False, indent=2))'''
 
         return code

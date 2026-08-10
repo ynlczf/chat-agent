@@ -13,7 +13,8 @@ from .sandbox import _OrgScopedSandboxBackendProxy, get_sandbox_manager, _sandbo
 
 logger = logging.getLogger(__name__)
 
-HABIT_SYSTEM_PROMPT = """你是一个智能助手，可以通过持续对话学习和记录用户的习惯与偏好。
+# /memories/AGENTS.md 的初始内容（即系统提示词），首次使用时写入 PostgresStore
+AGENTS_MEMORY = """你是一个智能助手，可以通过持续对话学习和记录用户的习惯与偏好。
 
 ## 关于用户习惯记录
 
@@ -68,8 +69,79 @@ HABIT_SYSTEM_PROMPT = """你是一个智能助手，可以通过持续对话学�
 """
 
 
+# AGENTS.md 是全局配置，与用户无关，统一存放在此命名空间（数据库仅一份）
+AGENTS_NAMESPACE = ("global",)
+AGENTS_KEY = "/AGENTS.md"
+
+
+class _GlobalAgentsStore:
+    """把 composite 剥离出的 "/" 归一化回 "/AGENTS.md" 的 Store 包装。
+
+    CompositeBackend 对路由前缀与文件路径完全相等的路径（"/memories/AGENTS.md"）
+    会把传入后端的 key 剥成 "/"，这里统一还原，保证全局只存一份 key="/AGENTS.md"。
+    """
+
+    def __init__(self, store: Any):
+        self._store = store
+
+    @staticmethod
+    def _key(key: str) -> str:
+        return AGENTS_KEY if key == "/" else key
+
+    def get(self, namespace, key, *args, **kwargs):
+        return self._store.get(namespace, self._key(key), *args, **kwargs)
+
+    def aget(self, namespace, key, *args, **kwargs):
+        return self._store.aget(namespace, self._key(key), *args, **kwargs)
+
+    def put(self, namespace, key, value, *args, **kwargs):
+        return self._store.put(namespace, self._key(key), value, *args, **kwargs)
+
+    def aput(self, namespace, key, value, *args, **kwargs):
+        return self._store.aput(namespace, self._key(key), value, *args, **kwargs)
+
+    def delete(self, namespace, key, *args, **kwargs):
+        return self._store.delete(namespace, self._key(key), *args, **kwargs)
+
+    def adelete(self, namespace, key, *args, **kwargs):
+        return self._store.adelete(namespace, self._key(key), *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+
+def _ensure_agents_memory(store: PostgresStore):
+    """确保全局 AGENTS.md（系统提示词配置）已存在，不存在则写入。"""
+    existing = store.get(AGENTS_NAMESPACE, AGENTS_KEY)
+    if existing:
+        return
+
+    store.put(AGENTS_NAMESPACE, AGENTS_KEY, {
+        "content": AGENTS_MEMORY,
+        "encoding": "utf-8",
+    })
+    logger.info("Created global /AGENTS.md")
+
+
+def _remove_per_user_agents_memory(store: PostgresStore):
+    """清理历史遗留的按用户存放的 AGENTS.md 副本（只保留全局一份）。"""
+    try:
+        removed = 0
+        for ns in store.list_namespaces(limit=1000):
+            if len(ns) == 1 and ns != AGENTS_NAMESPACE:
+                try:
+                    store.delete(ns, AGENTS_KEY)
+                    removed += 1
+                except Exception:
+                    pass
+        if removed:
+            logger.info(f"Removed {removed} per-user AGENTS.md copy/copies.")
+    except Exception as e:
+        logger.warning(f"Failed to clean per-user AGENTS.md copies: {e}", exc_info=True)
+
+
 def _ensure_user_habits(store: PostgresStore, user_id: str):
-    HABITS_KEY = "/memories/habits.md"
+    HABITS_KEY = "/habits.md"
     NAMESPACE = (user_id,)
 
     existing = store.get(NAMESPACE, HABITS_KEY)
@@ -103,7 +175,7 @@ _- [具体习惯描述] (来源：YYYY-MM-DD 对话)_
         "content": initial_content,
         "encoding": "utf-8",
     })
-    logger.info(f"Created /memories/habits.md for user: {user_id}")
+    logger.info(f"Created /habits.md for user: {user_id}")
 
 
 def create_agent(checkpointer: PostgresSaver, store: PostgresStore) -> Any:
@@ -118,13 +190,18 @@ def create_agent(checkpointer: PostgresSaver, store: PostgresStore) -> Any:
     agent = create_deep_agent(
         model=MODEL_NAME,
         context_schema=MemoryContext,
-        system_prompt=HABIT_SYSTEM_PROMPT,
         memory=["/memories/AGENTS.md", "/memories/habits.md"],
         skills=["/skills/"],
         checkpointer=checkpointer,
         backend=CompositeBackend(
             default=default_backend,
             routes={
+                # AGENTS.md 是全局配置：单独路由到全局命名空间（仅存一份），
+                # habits.md 仍按用户命名空间隔离。
+                "/memories/AGENTS.md": StoreBackend(
+                    namespace=lambda _rt: AGENTS_NAMESPACE,
+                    store=_GlobalAgentsStore(store),
+                ),
                 "/memories/": StoreBackend(
                     namespace=user_namespace,
                     store=store,
