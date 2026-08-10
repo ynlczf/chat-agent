@@ -17,7 +17,7 @@ from pathlib import Path
 import logging
 
 from deepagents import create_deep_agent
-from deepagents.backends import CompositeBackend, StoreBackend, StateBackend
+from deepagents.backends import CompositeBackend, StoreBackend, StateBackend, FilesystemBackend
 from deepagents.backends.protocol import SandboxBackendProtocol, ExecuteResponse
 from deepagents_opensandbox import OpensandboxBackend
 from opensandbox.sync.sandbox import SandboxSync
@@ -42,6 +42,16 @@ SANDBOX_IMAGE = os.getenv("SANDBOX_IMAGE", "opensandbox/code-interpreter:v1.1.0"
 SANDBOX_IDLE_TIMEOUT = 10 * 60  # 10 minutes in seconds
 SANDBOX_CLEANUP_INTERVAL = 60   # Check every 60 seconds
 
+# Local skill directory — served read-only to the agent via a FilesystemBackend
+# route on /skills/. The ynlczf-pptx-generator scripts are also uploaded into
+# each org's sandbox so `execute` can run them with SKILL_DIR=/skills/ynlczf-pptx-generator.
+PROJECT_ROOT = Path(__file__).parent
+LOCAL_SKILLS_DIR = PROJECT_ROOT / "skills"
+PPT_SKILL_DIR = LOCAL_SKILLS_DIR / "ynlczf-pptx-generator"
+# Lightweight PPT deps (ynlczf-pptx-generator only needs python-pptx).
+# Provisioned into each new sandbox.
+PPT_CORE_DEPS = ["python-pptx"]
+
 # Global references for resources
 _store = None
 _checkpointer = None
@@ -61,6 +71,9 @@ class _SandboxEntry:
         self.backend = backend
         self.last_used_at = time.time()
         self.lock = threading.Lock()
+        # PPT skill provisioning state (populated by a background thread)
+        self.provisioned = False
+        self.provisioning_error: Optional[str] = None
 
     def touch(self):
         self.last_used_at = time.time()
@@ -78,6 +91,81 @@ class _SandboxEntry:
             self.sandbox.close()
         except Exception:
             pass
+
+
+def _provision_sandbox_with_ppt_skill(backend: OpensandboxBackend) -> Tuple[bool, str]:
+    """Upload the ynlczf-pptx-generator skill tree into the sandbox and install core deps.
+
+    Mirrors the local ``skills/ynlczf-pptx-generator/`` directory to
+    ``/skills/ynlczf-pptx-generator/`` inside the sandbox so that
+    ``SKILL_DIR=/skills/ynlczf-pptx-generator`` resolves consistently when the
+    agent runs skill scripts via ``execute``. Then bootstraps pip (if missing)
+    and installs the lightweight python-pptx dependency.
+
+    This is best-effort and non-fatal: any failure is logged and reported so
+    the sandbox remains usable (the agent can pip-install missing packages on
+    demand).
+    """
+    if not PPT_SKILL_DIR.exists():
+        return False, f"local skill dir not found: {PPT_SKILL_DIR}"
+
+    # 1. Walk the local ynlczf-pptx-generator tree and collect (sandbox_path, content).
+    upload_pairs: List[Tuple[str, bytes]] = []
+    skip_dirs = {"__pycache__"}
+    for root, dirs, files in os.walk(PPT_SKILL_DIR):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for fname in files:
+            if fname.endswith(".pyc") or fname.startswith(".env"):
+                continue
+            local_path = Path(root) / fname
+            rel = local_path.relative_to(PPT_SKILL_DIR).as_posix()
+            sandbox_path = f"/skills/ynlczf-pptx-generator/{rel}"
+            try:
+                upload_pairs.append((sandbox_path, local_path.read_bytes()))
+            except Exception as e:
+                logger.debug(f"Provisioning: skip unreadable {local_path}: {e}")
+
+    # 2. Batch-upload to the sandbox.
+    BATCH = 50
+    failed = 0
+    for i in range(0, len(upload_pairs), BATCH):
+        chunk = upload_pairs[i:i + BATCH]
+        try:
+            responses = backend.upload_files(chunk)
+            for r in responses:
+                if r.error:
+                    failed += 1
+        except Exception as e:
+            logger.warning(f"Provisioning: upload batch failed: {e}")
+            failed += len(chunk)
+
+    # 3. Bootstrap pip if needed, then install core deps.
+    try:
+        backend.execute(
+            "python3 -m pip --version >/dev/null 2>&1 || python3 -m ensurepip --upgrade >/dev/null 2>&1 || true",
+            timeout=60,
+        )
+        install_res = backend.execute(
+            "python3 -m pip install --quiet --disable-pip-version-check "
+            + " ".join(PPT_CORE_DEPS) + " 2>&1",
+            timeout=300,
+        )
+        deps_ok = install_res.exit_code == 0
+    except Exception as e:
+        logger.warning(f"Provisioning: dep install error: {e}")
+        deps_ok = False
+        install_res = None
+
+    deps_tail = ""
+    if install_res is not None and not deps_ok:
+        # Surface a short tail of the pip output for debugging.
+        deps_tail = " | pip: " + (install_res.output or "")[-300:].replace("\n", " ")
+
+    msg = (
+        f"uploaded {len(upload_pairs)} files ({failed} failed); "
+        f"deps install {'ok' if deps_ok else 'failed'}{deps_tail}"
+    )
+    return deps_ok, msg
 
 
 class SandboxManager:
@@ -233,14 +321,46 @@ class SandboxManager:
                 backend = OpensandboxBackend(sandbox=sandbox)
                 entry = _SandboxEntry(sandbox=sandbox, backend=backend)
                 self._entries[org_id] = entry
+                need_provision = True
             else:
                 logger.debug(f"SandboxManager: reusing existing sandbox for org={org_id}")
+                need_provision = False
 
         # Acquire entry lock (not global) while touching
         with entry.lock:
             entry.touch()
             backend = entry.backend
+
+        # Provision the PPT skill (upload scripts + install deps) in the
+        # background so the first chat isn't blocked. By the time the agent
+        # finishes reading SKILL.md / references and starts running scripts,
+        # provisioning is typically done. If a scripts runs before completion,
+        # the agent sees the error and can retry / pip-install on demand.
+        if need_provision:
+            t = threading.Thread(
+                target=self._provision_entry,
+                args=(org_id, entry),
+                name=f"ppt-provision-{org_id}",
+                daemon=True,
+            )
+            t.start()
+
         return backend
+
+    @staticmethod
+    def _provision_entry(org_id: str, entry: "_SandboxEntry"):
+        """Background provisioning of a freshly created sandbox for PPT skill."""
+        try:
+            ok, msg = _provision_sandbox_with_ppt_skill(entry.backend)
+            with entry.lock:
+                entry.provisioned = ok
+                entry.provisioning_error = None if ok else msg
+            logger.info(f"SandboxManager: PPT provisioning for org={org_id} → {msg}")
+        except Exception as e:
+            with entry.lock:
+                entry.provisioned = False
+                entry.provisioning_error = str(e)
+            logger.warning(f"SandboxManager: PPT provisioning failed for org={org_id}: {e}")
 
     def get_sandbox_count(self) -> int:
         with self._global_lock:
@@ -516,6 +636,33 @@ async def lifespan(app: FastAPI):
 - 简单问答的答案
 - 敏感信息（密码、密钥、身份证号等）
 - 过期或无意义的闲聊
+
+## PPT 制作能力（ynlczf-pptx-generator 技能）
+
+你拥有 `ynlczf-pptx-generator` 技能，超轻量化生成极简 PPT 并导出 PPTX。仅依赖 python-pptx，无动画/渐变/复杂图表，适合快速汇报、课堂分享、短演示。
+当用户要求"做PPT/制作演示文稿/生成PPT/create PPT/做幻灯片/极简PPT/轻量化汇报PPT/导出pptx简报"等时，按以下约定执行：
+
+1. 先用 `read_file` 读取 `/skills/ynlczf-pptx-generator/SKILL.md`（`limit=1000`）了解硬性约束与页面结构。
+2. **两种使用方式**（任选其一，推荐方式一）：
+   - **方式一（推荐）**：直接用 `execute` 运行沙箱中的脚本：
+     ```
+     python3 /skills/ynlczf-pptx-generator/generate_pptx.py \
+       --topic "主题" \
+       --points "要点1,要点2,要点3" \
+       --page-num 5 \
+       --output /workspace/light_presentation.pptx
+     ```
+     可选参数：`--data "10,25,30,15"`（极简柱状图数据）、`--json`（以JSON输出结果）
+   - **方式二**：自行编写 Python 代码，参考 SKILL.md 中的 `generate_light_pptx` 函数代码，用 `write_file` 写入后再 `execute` 执行。
+3. **关键约定**：
+   - `SKILL_DIR` = `/skills/ynlczf-pptx-generator`
+   - 读取技能文档用 `read_file`（路径以 `/skills/ynlczf-pptx-generator/` 开头）
+   - 运行脚本用 `execute` 工具（当前组织沙箱，Linux 环境，`python3` 命令）
+   - 核心依赖 `python-pptx` 已预装到沙箱
+   - 输出文件保存到沙箱 `/workspace/` 目录下（绝对路径）
+4. 生成 PPTX 后，将沙箱中 pptx 的绝对路径填入下载链接格式（见每条消息末尾的【运行环境】），把可点击的下载链接返回给用户。
+5. 如遇到依赖缺失，可用 `execute` 运行 `python3 -m pip install python-pptx` 补装后重试。
+6. 若沙箱刚创建、脚本尚未预装完成导致首次执行失败，等待几秒后重试即可。
 """
 
         _agent = create_deep_agent(
@@ -523,6 +670,7 @@ async def lifespan(app: FastAPI):
             context_schema=MemoryContext,
             system_prompt=HABIT_SYSTEM_PROMPT,
             memory=["/memories/AGENTS.md", "/memories/habits.md"],
+            skills=["/skills/"],
             checkpointer=_checkpointer,
             backend=CompositeBackend(
                 default=default_backend,
@@ -530,6 +678,10 @@ async def lifespan(app: FastAPI):
                     "/memories/": StoreBackend(
                         namespace=user_namespace,
                         store=_store,
+                    ),
+                    "/skills/": FilesystemBackend(
+                        root_dir=str(LOCAL_SKILLS_DIR),
+                        virtual_mode=True,
                     ),
                 },
             ),
@@ -626,6 +778,22 @@ def _get_messages_from_state(state: Dict[str, Any]) -> List[MessageItem]:
 
 # ---- Synchronous helper functions (run in thread pool) ----
 
+def _build_env_footer(org_id: str) -> str:
+    """Per-request environment footer appended to user messages.
+
+    Gives the agent the current org_id (needed to build a PPT download URL)
+    and the sandbox working directory. Kept short to avoid bloating every
+    turn.
+    """
+    from urllib.parse import quote
+    return (
+        f"\n\n【运行环境】org_id={org_id}；沙箱工作目录 /workspace；"
+        f"PPT skill SKILL_DIR=/skills/ynlczf-pptx-generator（脚本与 python-pptx 依赖已预装到沙箱）。"
+        f"生成 PPT 后，把沙箱中 pptx 的绝对路径填入此格式给出下载链接："
+        f"/api/sandbox/download?org_id={quote(org_id)}&path=<沙箱中pptx绝对路径>"
+    )
+
+
 def _sync_chat(message: str, thread_id: str, user_id: str, org_id: str) -> Dict[str, Any]:
     try:
         _set_current_org(org_id)
@@ -633,8 +801,9 @@ def _sync_chat(message: str, thread_id: str, user_id: str, org_id: str) -> Dict[
         logger.info(f"Processing chat: thread_id={thread_id}, org_id={org_id}, message={message[:50]}...")
         config = RunnableConfig(configurable={"thread_id": thread_id})
         context = MemoryContext(user_id=user_id, org_id=org_id)
+        full_message = message + _build_env_footer(org_id)
         res = _agent.invoke(
-            {"messages": [{"role": "user", "content": message}]},
+            {"messages": [{"role": "user", "content": full_message}]},
             context=context,
             config=config,
         )
@@ -886,7 +1055,7 @@ def _sync_chat_with_file(message: str, thread_id: str, user_id: str, org_id: str
             # No file — still set thread-local for normal chat tool calls
             _set_current_org(org_id)
 
-        full_message = message + file_context
+        full_message = message + file_context + _build_env_footer(org_id)
 
         effective_org = _get_current_org()
         logger.info(
@@ -1077,6 +1246,62 @@ async def execute_code(request: Request):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _sync_download_sandbox_file(org_id: str, path: str) -> Optional[bytes]:
+    """Download a file from the org's sandbox (runs in thread pool)."""
+    try:
+        _set_current_org(org_id)
+        backend = _get_org_backend(org_id)
+        if backend is None:
+            logger.warning(f"Download: no backend for org={org_id}, path={path}")
+            return None
+        resp = backend.download_files([path])[0]
+        if resp.error:
+            logger.warning(f"Download: sandbox returned error for path={path}: {resp.error}")
+            return None
+        if resp.content is None:
+            logger.warning(f"Download: sandbox returned None content for path={path}")
+            return None
+        logger.info(f"Download: success, org={org_id}, path={path}, size={len(resp.content)} bytes")
+        return resp.content
+    except Exception as e:
+        logger.error(f"Download: exception for org={org_id}, path={path}: {e}", exc_info=True)
+        return None
+    finally:
+        _set_current_org(None)
+
+
+@app.get("/api/sandbox/download")
+async def sandbox_download(org_id: str, path: str):
+    """Download a generated artifact (e.g. PPTX) from the org's sandbox.
+
+    The agent constructs a link to this endpoint after exporting a PPTX,
+    filling in the org_id and the absolute sandbox path of the .pptx file.
+    """
+    if not _sandbox_available():
+        raise HTTPException(status_code=503, detail="沙箱服务不可用。")
+    if not path:
+        raise HTTPException(status_code=400, detail="path 参数不能为空。")
+    try:
+        content = await asyncio.wait_for(
+            asyncio.to_thread(_sync_download_sandbox_file, org_id, path),
+            timeout=60.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="下载超时")
+    if content is None:
+        raise HTTPException(status_code=404, detail="文件不存在或无法从沙箱下载。")
+    filename = Path(path).name or "download.pptx"
+    if filename.lower().endswith(".pptx"):
+        media = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    else:
+        media = "application/octet-stream"
+    return Response(
+        content=content,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/files")

@@ -731,6 +731,21 @@
     scrollToBottom();
   }
 
+  function renderContent(text) {
+    if (!text) return '';
+    // Escape HTML to prevent XSS
+    let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Convert markdown links [text](url) to <a> tags
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:#3b82f6;text-decoration:underline;">$1</a>');
+    // Convert bare URLs (not already inside an <a> tag) to clickable links
+    html = html.replace(/(?<!["'>])(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" style="color:#3b82f6;text-decoration:underline;">$1</a>');
+    // Convert relative download links /api/sandbox/download?... to clickable links
+    html = html.replace(/(?<!["'>=])((?:\/api\/sandbox\/download\?[^\s<]+))/g, '<a href="$1" target="_blank" style="color:#3b82f6;text-decoration:underline;">$1</a>');
+    // Preserve line breaks
+    html = html.replace(/\n/g, '<br>');
+    return html;
+  }
+
   function appendMessage(role, content, scroll = true, reasoning = null) {
     const container = $('messagesContainer');
 
@@ -767,7 +782,7 @@
 
     const answerEl = document.createElement('div');
     answerEl.className = 'message-answer';
-    answerEl.textContent = content;
+    answerEl.innerHTML = renderContent(content);
     bubble.appendChild(answerEl);
 
     container.appendChild(msg);
@@ -981,10 +996,10 @@
       if (data.reply) {
         const reply = data.reply;
         for (let i = 0; i <= reply.length; i += 2) {
-          answerEl.textContent = reply.slice(0, i);
+          answerEl.innerHTML = renderContent(reply.slice(0, i));
           scrollToBottom();
         }
-        answerEl.textContent = reply;
+        answerEl.innerHTML = renderContent(reply);
       } else {
         answerEl.textContent = '(无响应)';
       }
