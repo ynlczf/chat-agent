@@ -2,11 +2,12 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
-from langchain_core.messages import AIMessage, HumanMessage, BaseMessage
+from fastapi.responses import StreamingResponse
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.store.postgres import PostgresStore
@@ -248,78 +249,87 @@ def _sync_upload_file(file_id: str, filename: str, content: bytes, org_id: str) 
         _set_current_org(None)
 
 
+def _prepare_message_context(message: str, file_id: Optional[str], org_id: str) -> Tuple[str, str]:
+    """Build the full message sent to the agent and resolve the org that owns
+    the sandbox. Returns (full_message, execution_org)."""
+    file_context = ""
+    execution_org = org_id
+
+    if file_id and file_id in _uploaded_files:
+        parsed = _uploaded_files[file_id]
+
+        file_org_id = _file_org_map.get(file_id, org_id)
+        if file_org_id != org_id:
+            logger.warning(
+                f"File org mismatch: file_id={file_id} was uploaded to "
+                f"org={file_org_id} but current request org={org_id}. "
+                f"Using file's org for sandbox access."
+            )
+
+        _set_current_org(file_org_id)
+        org_backend = _get_org_backend(file_org_id)
+        execution_org = file_org_id
+
+        if parsed.is_small and parsed.full_content:
+            file_context = f"\n\n【已上传文件内容】\n{parsed.full_content}\n\n请基于以上文件内容回答问题。"
+        elif org_backend is not None:
+            sandbox_filename = f"{file_id}_{parsed.filename}"
+            sandbox_path = f"/workspace/{sandbox_filename}"
+            cached_content = _file_content_cache.get(file_id)
+            if cached_content is not None:
+                try:
+                    org_backend.upload_files([(sandbox_path, cached_content)])
+                    logger.info(
+                        f"Re-uploaded file to sandbox (org={file_org_id}): "
+                        f"{sandbox_path} (ensures file exists after possible recycle)"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to re-upload file to sandbox: {e}")
+
+            file_context = (
+                f"\n\n【已上传文件信息】\n"
+                f"文件名: {parsed.filename}\n"
+                f"文件类型: {parsed.file_type}\n"
+                f"文件在沙箱中的路径: {sandbox_path}\n"
+                f"总行数: {parsed.row_count}\n"
+                f"列名: {parsed.columns}\n\n"
+                f"你可以使用 execute 工具在沙箱中运行命令来分析此文件。\n"
+                f"沙箱环境为 Python 3.12，**没有安装 pandas/numpy/pip**，请使用 Python 内置的 csv 模块。\n"
+                f"示例步骤：\n"
+                f"1. 用 write_file 工具将分析代码写入 /workspace/analyze.py\n"
+                f"2. 用 execute 工具运行 `python3 /workspace/analyze.py`\n"
+                f"代码示例:\n"
+                f"```python\n"
+                f"import csv, json\n"
+                f"with open('{sandbox_path}', 'r', encoding='utf-8') as f:\n"
+                f"    reader = csv.DictReader(f)\n"
+                f"    rows = list(reader)\n"
+                f"# 根据用户问题编写统计逻辑\n"
+                f"print(json.dumps({{'count': len(rows)}}, ensure_ascii=False))\n"
+                f"```\n"
+                f"请根据用户的具体问题编写对应的代码并执行，基于执行结果回答问题。\n\n"
+                f"【文件预览】\n{parsed.preview}"
+            )
+        else:
+            file_context = (
+                f"\n\n【已上传文件信息】\n"
+                f"文件名: {parsed.filename}\n"
+                f"行数: {parsed.row_count}\n"
+                f"列名: {parsed.columns}\n"
+                f"由于文件较大且沙箱不可用，只能提供预览数据。\n\n"
+                f"【文件预览】\n{parsed.preview}"
+            )
+    else:
+        _set_current_org(org_id)
+
+    return message + file_context + _build_env_footer(org_id), execution_org
+
+
 def _sync_chat_with_file(message: str, thread_id: str, user_id: str, org_id: str, file_id: Optional[str]) -> Dict[str, Any]:
     try:
         _ensure_user_habits(_store, user_id)
-        file_context = ""
-
-        if file_id and file_id in _uploaded_files:
-            parsed = _uploaded_files[file_id]
-
-            file_org_id = _file_org_map.get(file_id, org_id)
-            if file_org_id != org_id:
-                logger.warning(
-                    f"File org mismatch: file_id={file_id} was uploaded to "
-                    f"org={file_org_id} but current request org={org_id}. "
-                    f"Using file's org for sandbox access."
-                )
-
-            _set_current_org(file_org_id)
-            org_backend = _get_org_backend(file_org_id)
-
-            if parsed.is_small and parsed.full_content:
-                file_context = f"\n\n【已上传文件内容】\n{parsed.full_content}\n\n请基于以上文件内容回答问题。"
-            elif org_backend is not None:
-                sandbox_filename = f"{file_id}_{parsed.filename}"
-                sandbox_path = f"/workspace/{sandbox_filename}"
-                cached_content = _file_content_cache.get(file_id)
-                if cached_content is not None:
-                    try:
-                        org_backend.upload_files([(sandbox_path, cached_content)])
-                        logger.info(
-                            f"Re-uploaded file to sandbox (org={file_org_id}): "
-                            f"{sandbox_path} (ensures file exists after possible recycle)"
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to re-upload file to sandbox: {e}")
-
-                file_context = (
-                    f"\n\n【已上传文件信息】\n"
-                    f"文件名: {parsed.filename}\n"
-                    f"文件类型: {parsed.file_type}\n"
-                    f"文件在沙箱中的路径: {sandbox_path}\n"
-                    f"总行数: {parsed.row_count}\n"
-                    f"列名: {parsed.columns}\n\n"
-                    f"你可以使用 execute 工具在沙箱中运行命令来分析此文件。\n"
-                    f"沙箱环境为 Python 3.12，**没有安装 pandas/numpy/pip**，请使用 Python 内置的 csv 模块。\n"
-                    f"示例步骤：\n"
-                    f"1. 用 write_file 工具将分析代码写入 /workspace/analyze.py\n"
-                    f"2. 用 execute 工具运行 `python3 /workspace/analyze.py`\n"
-                    f"代码示例:\n"
-                    f"```python\n"
-                    f"import csv, json\n"
-                    f"with open('{sandbox_path}', 'r', encoding='utf-8') as f:\n"
-                    f"    reader = csv.DictReader(f)\n"
-                    f"    rows = list(reader)\n"
-                    f"# 根据用户问题编写统计逻辑\n"
-                    f"print(json.dumps({{'count': len(rows)}}, ensure_ascii=False))\n"
-                    f"```\n"
-                    f"请根据用户的具体问题编写对应的代码并执行，基于执行结果回答问题。\n\n"
-                    f"【文件预览】\n{parsed.preview}"
-                )
-            else:
-                file_context = (
-                    f"\n\n【已上传文件信息】\n"
-                    f"文件名: {parsed.filename}\n"
-                    f"行数: {parsed.row_count}\n"
-                    f"列名: {parsed.columns}\n"
-                    f"由于文件较大且沙箱不可用，只能提供预览数据。\n\n"
-                    f"【文件预览】\n{parsed.preview}"
-                )
-        else:
-            _set_current_org(org_id)
-
-        full_message = message + file_context + _build_env_footer(org_id)
+        full_message, execution_org = _prepare_message_context(message, file_id, org_id)
+        _set_current_org(execution_org)
 
         effective_org = _get_current_org()
         logger.info(
@@ -395,6 +405,202 @@ def _sync_download_sandbox_file(org_id: str, path: str) -> Optional[bytes]:
         return None
     finally:
         _set_current_org(None)
+
+
+# ---------------------------------------------------------------------------
+# Streaming (SSE) helpers — 基于 DeepAgents/LangGraph 原生 graph.stream()
+# ---------------------------------------------------------------------------
+
+THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _sse(event_type: str, payload: Dict[str, Any]) -> str:
+    return f"data: {json.dumps({'type': event_type, **payload}, ensure_ascii=False)}\n\n"
+
+
+def _coerce_text(value: Any) -> str:
+    """Extract plain text from a message content (str or list of blocks)."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: List[str] = []
+        for block in value:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return ""
+
+
+class _ThinkStreamSplitter:
+    """Incrementally split a streaming text stream into reasoning
+    (<think>...</think>) and visible content."""
+
+    def __init__(self, on_reasoning, on_content):
+        self._on_reasoning = on_reasoning
+        self._on_content = on_content
+        self._buffer = ""
+
+    def push(self, text: str) -> None:
+        self._buffer += text
+        self._drain()
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._on_content(self._buffer)
+            self._buffer = ""
+
+    def _drain(self) -> None:
+        while True:
+            buf = self._buffer
+            if "<think" not in buf:
+                if buf:
+                    self._on_content(buf)
+                    self._buffer = ""
+                return
+            m = THINK_RE.search(buf)
+            if m:
+                if m.start() > 0:
+                    self._on_content(buf[:m.start()])
+                reasoning = m.group(1).strip()
+                if reasoning:
+                    self._on_reasoning(reasoning)
+                self._buffer = buf[m.end():]
+                continue
+            # Unclosed <think at the tail: flush completed content before it,
+            # keep the tag onward until it closes.
+            last_start = buf.rfind("<think")
+            if last_start > 0:
+                self._on_content(buf[:last_start])
+                self._buffer = buf[last_start:]
+                continue
+            return
+
+
+def _extract_tool_calls(update: Any) -> List[str]:
+    """Recursively walk a node update (dict/list) for parsed tool calls."""
+    names: List[str] = []
+
+    def walk(value: Any):
+        if isinstance(value, BaseMessage):
+            for tc in getattr(value, "tool_calls", None) or []:
+                name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+                if name:
+                    names.append(name)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v)
+        elif isinstance(value, dict):
+            for v in value.values():
+                walk(v)
+
+    walk(update)
+    return names
+
+
+def _stream_sse(
+    message: str,
+    thread_id: str,
+    user_id: str,
+    org_id: str,
+    file_id: Optional[str] = None,
+) -> Iterator[str]:
+    """同步生成器：直接调用 DeepAgents/LangGraph 原生的 graph.stream()，
+    逐个产出 SSE 事件字符串。由 Starlette StreamingResponse 在线程池中迭代。"""
+    reasoning_parts: List[str] = []
+    content_parts: List[str] = []
+    seen_tools = set()
+    pending_events: List[str] = []
+
+    def on_reasoning(text: str):
+        reasoning_parts.append(text)
+        pending_events.append(_sse("reasoning_token", {"content": text}))
+
+    def on_content(text: str):
+        content_parts.append(text)
+        pending_events.append(_sse("token", {"content": text}))
+
+    splitter = _ThinkStreamSplitter(on_reasoning, on_content)
+
+    def drain() -> List[str]:
+        if not pending_events:
+            return []
+        events = pending_events[:]
+        pending_events.clear()
+        return events
+
+    try:
+        _ensure_user_habits(_store, user_id)
+        full_message, execution_org = _prepare_message_context(message, file_id, org_id)
+        # 防御性设置：保证首个迭代线程的上下文正确（后续线程由端点上下文传播）
+        _set_current_org(execution_org)
+
+        logger.info(
+            f"Streaming chat: thread_id={thread_id}, org_id={org_id}, "
+            f"file_id={file_id}, sandbox_org={_get_current_org()}"
+        )
+        config = RunnableConfig(configurable={"thread_id": thread_id})
+        context = MemoryContext(user_id=user_id, org_id=org_id)
+
+        for mode, data in _agent.stream(
+            {"messages": [{"role": "user", "content": full_message}]},
+            context=context,
+            config=config,
+            stream_mode=["messages", "updates"],
+        ):
+            if mode == "updates":
+                # 节点完成后的完整更新：从中识别工具调用
+                for name in _extract_tool_calls(data):
+                    if name and name not in seen_tools:
+                        seen_tools.add(name)
+                        yield _sse("tool_call", {"name": name})
+                continue
+
+            # mode == "messages": (chunk, metadata)
+            chunk, _meta = data
+            if isinstance(chunk, ToolMessage):
+                output = _coerce_text(chunk.content).strip()
+                if output:
+                    short = output if len(output) <= 300 else output[:300] + "..."
+                    yield _sse("tool_result", {"output": short})
+                continue
+            if not isinstance(chunk, AIMessageChunk):
+                continue
+
+            # 流式思考内容（如 deepseek 的 reasoning_content）
+            extra = chunk.additional_kwargs or {}
+            rc = extra.get("reasoning_content") or extra.get("reasoning")
+            rc_text = _coerce_text(rc)
+            if rc_text:
+                reasoning_parts.append(rc_text)
+                yield _sse("reasoning_token", {"content": rc_text})
+
+            # 正文内容（把 <think> 块拆到推理区，正文实时显示）
+            text = _coerce_text(chunk.content)
+            if text:
+                splitter.push(text)
+                for ev in drain():
+                    yield ev
+    except Exception as e:
+        logger.error(f"Streaming chat error: thread_id={thread_id}: {e}", exc_info=True)
+        yield _sse("error", {"message": str(e)})
+        return
+    finally:
+        _set_current_org(None)
+
+    splitter.flush()
+    for ev in drain():
+        yield ev
+
+    full_content = "".join(content_parts).strip()
+    full_reasoning = "\n\n".join(p for p in reasoning_parts if p.strip()).strip() or None
+    logger.info(
+        f"Streaming chat completed: thread_id={thread_id}, reply_length={len(full_content)}"
+    )
+    yield _sse("done", {"reply": full_content, "reasoning": full_reasoning})
 
 
 @router.post("/chat")
@@ -481,6 +687,61 @@ async def chat_with_file(request: Request):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _stream_headers() -> Dict[str, str]:
+    return {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+
+
+@router.post("/chat/stream")
+async def chat_stream(request: Request):
+    if not _agent:
+        raise HTTPException(status_code=500, detail="Agent not initialized")
+    body = await request.body()
+    data = json.loads(body) if body else {}
+    message = data.get("message", "")
+    thread_id = data.get("thread_id", "default-thread")
+    user_id = data.get("user_id", "local-user")
+    org_id = data.get("org_id", "default-org")
+    if not message.strip():
+        raise HTTPException(status_code=400, detail="消息内容不能为空")
+
+    # 在端点上下文设置 org：Starlette 在线程池迭代同步生成器时，
+    # anyio 会把本任务的 contextvars 拷贝到每个工作线程，保证工具路由正确。
+    _set_current_org(org_id)
+    return StreamingResponse(
+        _stream_sse(message, thread_id, user_id, org_id),
+        media_type="text/event-stream",
+        headers=_stream_headers(),
+    )
+
+
+@router.post("/chat-with-file/stream")
+async def chat_with_file_stream(request: Request):
+    if not _agent:
+        raise HTTPException(status_code=500, detail="Agent not initialized")
+    body = await request.body()
+    data = json.loads(body) if body else {}
+    message = data.get("message", "")
+    thread_id = data.get("thread_id", "default-thread")
+    user_id = data.get("user_id", "local-user")
+    org_id = data.get("org_id", "default-org")
+    file_id = data.get("file_id")
+    if not message.strip():
+        raise HTTPException(status_code=400, detail="消息内容不能为空")
+
+    # 与 _prepare_message_context 保持一致：文件所属组织的沙箱优先
+    execution_org = _file_org_map.get(file_id, org_id) if file_id else org_id
+    _set_current_org(execution_org)
+    return StreamingResponse(
+        _stream_sse(message, thread_id, user_id, org_id, file_id),
+        media_type="text/event-stream",
+        headers=_stream_headers(),
+    )
 
 
 @router.post("/sandbox/execute")

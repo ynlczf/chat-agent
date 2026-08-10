@@ -308,6 +308,13 @@
     white-space: pre-wrap;
     word-wrap: break-word;
   }
+  .tool-status {
+    font-size: 12px;
+    color: #6b7280;
+    padding: 6px 0;
+    border-bottom: 1px dashed #e5e7eb;
+    margin-bottom: 6px;
+  }
 
   .empty-state {
     flex: 1;
@@ -928,22 +935,62 @@
     const bubble = assistantMsg.querySelector('.message-bubble');
     const answerEl = bubble.querySelector('.message-answer');
 
-    try {
-      let finalMessage = text;
+    let fullReply = '';
+    let fullReasoning = '';
+    let toolStatusEl = null;
+    let reasoningSection = null;
+    let reasoningContentEl = null;
+    let renderTimer = null;
 
+    const flushAnswer = () => {
+      answerEl.innerHTML = renderContent(fullReply);
+      scrollToBottom();
+    };
+    const scheduleAnswerRender = () => {
+      if (renderTimer) return;
+      renderTimer = setTimeout(() => { renderTimer = null; flushAnswer(); }, 40);
+    };
+    const ensureReasoning = () => {
+      if (reasoningSection) return;
+      reasoningSection = document.createElement('div');
+      reasoningSection.className = 'reasoning-section';
+      reasoningSection.innerHTML = `
+        <div class="reasoning-header" title="点击展开/收起思考过程">
+          <span class="reasoning-icon">💭</span>
+          <span>思考过程</span>
+          <span class="reasoning-toggle">▼</span>
+        </div>
+        <div class="reasoning-content"></div>
+      `;
+      reasoningContentEl = reasoningSection.querySelector('.reasoning-content');
+      reasoningSection.querySelector('.reasoning-header').addEventListener('click', () => {
+        reasoningSection.classList.toggle('collapsed');
+      });
+      bubble.insertBefore(reasoningSection, answerEl);
+      scrollToBottom();
+    };
+    const showToolStatus = (label) => {
+      if (!toolStatusEl) {
+        toolStatusEl = document.createElement('div');
+        toolStatusEl.className = 'tool-status';
+        bubble.insertBefore(toolStatusEl, answerEl);
+      }
+      toolStatusEl.textContent = label;
+    };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 180000);
+
+    try {
       // For large files (code_execution), the agent autonomously writes and
-      // executes code in the sandbox via OpensandboxBackend — no need to
-      // pre-run generic stats code on the frontend.
+      // executes code in the sandbox — show a status hint while streaming.
       if (uploadedFile && uploadedFile.analysis_type === 'code_execution') {
-        answerEl.textContent = '⏳ 正在分析文件，Agent 将自动编写并执行代码...';
+        showToolStatus('⏳ 正在分析文件，Agent 将自动编写并执行代码...');
       }
 
-      const endpoint = uploadedFile ? '/api/chat-with-file' : '/api/chat';
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 180000);
-
+      const endpoint = uploadedFile ? '/api/chat-with-file/stream' : '/api/chat/stream';
       const body = {
-        message: finalMessage,
+        message: text,
         thread_id: currentThreadId,
         user_id: getUserId(),
         org_id: getOrgId(),
@@ -969,38 +1016,76 @@
         throw new Error(errMsg);
       }
 
-      const data = await res.json();
+      if (!res.body) throw new Error('浏览器不支持流式响应');
 
-      // Insert reasoning (thinking) section above the answer when present
-      if (data.reasoning && data.reasoning.trim()) {
-        const existing = bubble.querySelector('.reasoning-section');
-        if (!existing) {
-          const reasoningSection = document.createElement('div');
-          reasoningSection.className = 'reasoning-section collapsed';
-          reasoningSection.innerHTML = `
-            <div class="reasoning-header" title="点击展开/收起思考过程">
-              <span class="reasoning-icon">💭</span>
-              <span>思考过程</span>
-              <span class="reasoning-toggle">▼</span>
-            </div>
-            <div class="reasoning-content"></div>
-          `;
-          reasoningSection.querySelector('.reasoning-content').textContent = data.reasoning;
-          reasoningSection.querySelector('.reasoning-header').addEventListener('click', () => {
-            reasoningSection.classList.toggle('collapsed');
-          });
-          bubble.insertBefore(reasoningSection, answerEl);
+      // Consume the SSE stream and render tokens in real time.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+
+          for (const line of frame.split('\n')) {
+            if (!line.startsWith('data:')) continue;
+            const raw = line.slice(5).trim();
+            if (!raw) continue;
+
+            let ev;
+            try {
+              ev = JSON.parse(raw);
+            } catch (e) {
+              console.error('SSE 解析失败:', raw, e);
+              continue;
+            }
+
+            switch (ev.type) {
+              case 'token':
+                fullReply += ev.content || '';
+                scheduleAnswerRender();
+                break;
+              case 'reasoning_token':
+                fullReasoning += ev.content || '';
+                ensureReasoning();
+                reasoningContentEl.textContent = fullReasoning;
+                scrollToBottom();
+                break;
+              case 'tool_call':
+                showToolStatus(`🔧 正在调用工具: ${ev.name} ...`);
+                break;
+              case 'tool_result':
+                showToolStatus('✅ 工具执行完成');
+                break;
+              case 'done':
+                fullReply = ev.reply != null ? ev.reply : fullReply;
+                if (ev.reasoning != null) fullReasoning = ev.reasoning;
+                break;
+              case 'error':
+                throw new Error(ev.message || '流式响应出错');
+            }
+          }
         }
       }
 
-      if (data.reply) {
-        const reply = data.reply;
-        for (let i = 0; i <= reply.length; i += 2) {
-          answerEl.innerHTML = renderContent(reply.slice(0, i));
-          scrollToBottom();
+      if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+      flushAnswer();
+
+      if (reasoningSection) {
+        if (fullReasoning && fullReasoning.trim()) {
+          reasoningSection.classList.add('collapsed');
+        } else {
+          reasoningSection.remove();
         }
-        answerEl.innerHTML = renderContent(reply);
-      } else {
+      }
+
+      if (!fullReply.trim()) {
         answerEl.textContent = '(无响应)';
       }
 
