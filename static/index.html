@@ -48,6 +48,22 @@
     transform: translateY(-1px);
     box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
   }
+  .filter-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    font-size: 13px;
+    color: #6b7280;
+    cursor: pointer;
+    user-select: none;
+  }
+  .filter-row input[type="checkbox"] {
+    cursor: pointer;
+    accent-color: #667eea;
+    width: 14px;
+    height: 14px;
+  }
   .thread-list {
     flex: 1;
     overflow-y: auto;
@@ -476,6 +492,9 @@
   <div class="sidebar-header">
     <h2>💬 AI 聊天助手</h2>
     <button class="new-chat-btn" onclick="newChat()">+ 新建对话</button>
+    <label class="filter-row">
+      <input type="checkbox" id="onlyMineCheckbox"> 只看我的对话
+    </label>
   </div>
   <div class="thread-list" id="threadList"></div>
 </div>
@@ -540,8 +559,20 @@
   const orgIdInput = $('orgIdInput');
   userIdInput.value = localStorage.getItem(USER_ID_KEY) || 'local-user';
   orgIdInput.value = localStorage.getItem(ORG_ID_KEY) || 'default-org';
-  userIdInput.addEventListener('change', () => localStorage.setItem(USER_ID_KEY, userIdInput.value));
-  orgIdInput.addEventListener('change', () => localStorage.setItem(ORG_ID_KEY, orgIdInput.value));
+  userIdInput.addEventListener('change', () => {
+    localStorage.setItem(USER_ID_KEY, userIdInput.value);
+    listThreads();
+  });
+  orgIdInput.addEventListener('change', () => {
+    localStorage.setItem(ORG_ID_KEY, orgIdInput.value);
+    // If current thread doesn't belong to the new org, start fresh
+    if (currentThreadId && !threadBelongsToOrg(currentThreadId, getOrgId())) {
+      newChat();
+    } else {
+      listThreads();
+    }
+  });
+  $('onlyMineCheckbox').addEventListener('change', () => listThreads());
 
   function getUserId() { return userIdInput.value.trim() || 'local-user'; }
   function getOrgId() { return orgIdInput.value.trim() || 'default-org'; }
@@ -559,12 +590,29 @@
   }
 
   function generateThreadId() {
-    return 'thread-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    // Encode org_id and user_id into thread_id so the backend can filter
+    // threads by organization (and optionally by user).
+    // Format: {org_id}__{user_id}__thread-{timestamp}-{random}
+    const orgId = getOrgId();
+    const userId = getUserId();
+    return `${orgId}__${userId}__thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function threadBelongsToOrg(threadId, orgId) {
+    const parts = threadId.split('__', 2);
+    if (parts.length < 2) return false;
+    return parts[0] === orgId;
   }
 
   async function listThreads() {
     try {
-      const res = await fetch('/api/threads');
+      const params = new URLSearchParams();
+      params.set('org_id', getOrgId());
+      if ($('onlyMineCheckbox').checked) {
+        params.set('only_mine', 'true');
+        params.set('user_id', getUserId());
+      }
+      const res = await fetch(`/api/threads?${params.toString()}`);
       if (!res.ok) throw new Error('获取会话列表失败');
       const data = await res.json();
       renderThreadList(data);
