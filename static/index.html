@@ -132,6 +132,30 @@
     border-radius: 20px;
     font-family: monospace;
   }
+  .user-identity {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .user-identity label {
+    font-size: 12px;
+    color: #6b7280;
+    white-space: nowrap;
+  }
+  .user-identity input {
+    width: 110px;
+    padding: 4px 8px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 12px;
+    font-family: monospace;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .user-identity input:focus {
+    border-color: #667eea;
+    box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
+  }
 
   .messages-container {
     flex: 1;
@@ -459,7 +483,17 @@
 <div class="chat-main">
   <div class="chat-header">
     <h1 id="chatTitle">开始新对话</h1>
-    <span class="thread-id-badge" id="threadIdBadge">-</span>
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div class="user-identity">
+        <label for="userIdInput">User:</label>
+        <input type="text" id="userIdInput" placeholder="local-user" autocomplete="off">
+      </div>
+      <div class="user-identity">
+        <label for="orgIdInput">Org:</label>
+        <input type="text" id="orgIdInput" placeholder="default-org" autocomplete="off">
+      </div>
+      <span class="thread-id-badge" id="threadIdBadge">-</span>
+    </div>
   </div>
   <div class="messages-container" id="messagesContainer">
     <div class="empty-state">
@@ -493,11 +527,24 @@
 
 <script>
   const STORAGE_KEY = 'ai_chat_current_thread_id';
+  const USER_ID_KEY = 'ai_chat_user_id';
+  const ORG_ID_KEY = 'ai_chat_org_id';
   let currentThreadId = localStorage.getItem(STORAGE_KEY) || null;
   let isLoading = false;
   let uploadedFile = null;  // { file_id, filename, analysis_type, code }
 
   const $ = (id) => document.getElementById(id);
+
+  // Restore user identity from localStorage
+  const userIdInput = $('userIdInput');
+  const orgIdInput = $('orgIdInput');
+  userIdInput.value = localStorage.getItem(USER_ID_KEY) || 'local-user';
+  orgIdInput.value = localStorage.getItem(ORG_ID_KEY) || 'default-org';
+  userIdInput.addEventListener('change', () => localStorage.setItem(USER_ID_KEY, userIdInput.value));
+  orgIdInput.addEventListener('change', () => localStorage.setItem(ORG_ID_KEY, orgIdInput.value));
+
+  function getUserId() { return userIdInput.value.trim() || 'local-user'; }
+  function getOrgId() { return orgIdInput.value.trim() || 'default-org'; }
 
   function showToast(msg) {
     const t = $('toast');
@@ -717,6 +764,7 @@
     try {
       const formData = new FormData();
       formData.append('file', file);
+      formData.append('org_id', getOrgId());
 
       const res = await fetch('/api/files/upload', {
         method: 'POST',
@@ -782,7 +830,7 @@
       const res = await fetch('/api/sandbox/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, timeout: 60 }),
+        body: JSON.stringify({ code, timeout: 60, org_id: getOrgId() }),
       });
       if (!res.ok) throw new Error('代码执行失败');
       const data = await res.json();
@@ -834,8 +882,8 @@
       const body = {
         message: finalMessage,
         thread_id: currentThreadId,
-        user_id: 'local-user',
-        org_id: 'default-org',
+        user_id: getUserId(),
+        org_id: getOrgId(),
       };
       if (uploadedFile) {
         body.file_id = uploadedFile.file_id;

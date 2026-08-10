@@ -19,7 +19,7 @@ try:
     )
 
     # 展示沙箱环境的作用
-    test_prompt = """查看当前环境可以运行那些代码？是否可以运行java、python、node.js等语言的代码？"""
+    test_prompt = """查看当前环境是否可以安装python-pptx依赖？"""
 
     res = agent.invoke({
         "messages": [
