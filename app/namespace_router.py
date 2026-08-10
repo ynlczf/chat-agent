@@ -1,4 +1,3 @@
-
 def assistant_namespace(rt):
     if rt.server_info:
         return (rt.server_info.assistant_id,)
@@ -16,7 +15,6 @@ def org_namespace(rt):
     org_id = getattr(rt.context, "org_id", "default-org")
     return (org_id,)
 
+
 def def_namespace(rt):
     return ("default",)
-
-
