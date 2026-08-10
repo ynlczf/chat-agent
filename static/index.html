@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 聊天助手</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: #f5f7fb;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+  }
+
+  /* Sidebar */
+  .sidebar {
+    width: 280px;
+    background: #ffffff;
+    border-right: 1px solid #e5e7eb;
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+  }
+  .sidebar-header {
+    padding: 20px;
+    border-bottom: 1px solid #e5e7eb;
+  }
+  .sidebar-header h2 {
+    font-size: 18px;
+    color: #111827;
+    margin-bottom: 12px;
+  }
+  .new-chat-btn {
+    width: 100%;
+    padding: 10px 16px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .new-chat-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+  }
+  .thread-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+  }
+  .thread-item {
+    padding: 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    margin-bottom: 4px;
+    transition: background 0.15s;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .thread-item:hover {
+    background: #f3f4f6;
+  }
+  .thread-item.active {
+    background: #eef2ff;
+  }
+  .thread-content {
+    flex: 1;
+    min-width: 0;
+  }
+  .thread-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: #111827;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .thread-preview {
+    font-size: 12px;
+    color: #6b7280;
+    margin-top: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .thread-delete {
+    padding: 4px 8px;
+    background: transparent;
+    border: none;
+    color: #9ca3af;
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .thread-delete:hover {
+    background: #fee2e2;
+    color: #ef4444;
+  }
+
+  /* Main chat area */
+  .chat-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .chat-header {
+    padding: 16px 24px;
+    background: white;
+    border-bottom: 1px solid #e5e7eb;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .chat-header h1 {
+    font-size: 18px;
+    color: #111827;
+  }
+  .thread-id-badge {
+    font-size: 12px;
+    color: #6b7280;
+    background: #f3f4f6;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-family: monospace;
+  }
+
+  .messages-container {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .messages-container::-webkit-scrollbar {
+    width: 6px;
+  }
+  .messages-container::-webkit-scrollbar-thumb {
+    background: #d1d5db;
+    border-radius: 3px;
+  }
+
+  .message {
+    display: flex;
+    gap: 12px;
+    max-width: 80%;
+  }
+  .message.user {
+    align-self: flex-end;
+    flex-direction: row-reverse;
+  }
+  .message-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .message.assistant .message-avatar {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+  }
+  .message.user .message-avatar {
+    background: #374151;
+    color: white;
+  }
+  .message-bubble {
+    padding: 12px 16px;
+    border-radius: 12px;
+    line-height: 1.6;
+    font-size: 14px;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+  }
+  .message.assistant .message-bubble {
+    background: white;
+    border: 1px solid #e5e7eb;
+    color: #111827;
+    border-top-left-radius: 4px;
+  }
+  .message.user .message-bubble {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border-top-right-radius: 4px;
+  }
+
+  /* Reasoning / thinking section (shown above the answer inside assistant bubble) */
+  .message.assistant .message-bubble {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .reasoning-section {
+    border-bottom: 1px dashed #e5e7eb;
+    padding: 0 0 10px 0;
+    margin-bottom: 10px;
+    background: #fafafa;
+    margin: -12px -16px 10px -16px;
+    padding: 12px 16px;
+    border-top-left-radius: 11px;
+    border-top-right-radius: 11px;
+  }
+  .reasoning-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #6b7280;
+    cursor: pointer;
+    user-select: none;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+  .reasoning-header:hover {
+    color: #4f46e5;
+  }
+  .reasoning-header .reasoning-icon {
+    font-size: 13px;
+  }
+  .reasoning-header .reasoning-toggle {
+    margin-left: auto;
+    font-size: 11px;
+    color: #9ca3af;
+    transition: transform 0.2s;
+  }
+  .reasoning-section.collapsed .reasoning-toggle {
+    transform: rotate(-90deg);
+  }
+  .reasoning-content {
+    font-size: 13px;
+    line-height: 1.55;
+    color: #6b7280;
+    font-style: italic;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    background: #f9fafb;
+    border-left: 3px solid #c7d2fe;
+    padding: 8px 10px;
+    border-radius: 0 6px 6px 0;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .reasoning-section.collapsed .reasoning-content {
+    display: none;
+  }
+  .reasoning-content::-webkit-scrollbar {
+    width: 4px;
+  }
+  .reasoning-content::-webkit-scrollbar-thumb {
+    background: #d1d5db;
+    border-radius: 2px;
+  }
+  .message.assistant .message-answer {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+
+  .empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: #9ca3af;
+    gap: 12px;
+  }
+  .empty-state-icon {
+    font-size: 48px;
+  }
+  .empty-state-text {
+    font-size: 16px;
+  }
+
+  /* Input area */
+  .input-area {
+    padding: 16px 24px;
+    background: white;
+    border-top: 1px solid #e5e7eb;
+  }
+  .input-wrapper {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+  }
+  .message-input {
+    flex: 1;
+    padding: 12px 16px;
+    border: 1px solid #d1d5db;
+    border-radius: 12px;
+    font-size: 14px;
+    resize: none;
+    min-height: 48px;
+    max-height: 200px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .message-input:focus {
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+  }
+  .send-btn {
+    padding: 12px 20px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    height: 48px;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .send-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+  }
+  .send-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  /* File upload */
+  .file-upload-area {
+    padding: 8px 24px 0;
+  }
+  .file-upload-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .file-upload-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    background: #f3f4f6;
+    border: 1px dashed #d1d5db;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    color: #6b7280;
+    transition: all 0.15s;
+  }
+  .file-upload-btn:hover {
+    background: #e5e7eb;
+    border-color: #667eea;
+    color: #667eea;
+  }
+  .file-upload-btn.loading {
+    opacity: 0.6;
+    pointer-events: none;
+  }
+  .file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: #eef2ff;
+    border: 1px solid #c7d2fe;
+    border-radius: 20px;
+    font-size: 13px;
+    color: #4f46e5;
+  }
+  .file-chip .file-remove {
+    cursor: pointer;
+    color: #9ca3af;
+    font-size: 14px;
+  }
+  .file-chip .file-remove:hover {
+    color: #ef4444;
+  }
+  .file-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: #fef3c7;
+    border-radius: 10px;
+    font-size: 11px;
+    color: #92400e;
+  }
+  .file-code-btn {
+    background: #fef3c7;
+    color: #92400e;
+    border: 1px solid #fde68a;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+    margin-left: 4px;
+  }
+  .file-code-btn:hover {
+    background: #fde68a;
+  }
+
+  .loading-dots {
+    display: inline-flex;
+    gap: 4px;
+    padding: 4px 0;
+  }
+  .loading-dots span {
+    width: 6px;
+    height: 6px;
+    background: #9ca3af;
+    border-radius: 50%;
+    animation: bounce 1.4s infinite ease-in-out both;
+  }
+  .loading-dots span:nth-child(1) { animation-delay: -0.32s; }
+  .loading-dots span:nth-child(2) { animation-delay: -0.16s; }
+  @keyframes bounce {
+    0%, 80%, 100% { transform: scale(0); }
+    40% { transform: scale(1); }
+  }
+
+  .toast {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 12px 20px;
+    background: #ef4444;
+    color: white;
+    border-radius: 8px;
+    font-size: 14px;
+    z-index: 1000;
+    display: none;
+    animation: slideIn 0.3s ease;
+  }
+  @keyframes slideIn {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+  }
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <div class="sidebar-header">
+    <h2>💬 AI 聊天助手</h2>
+    <button class="new-chat-btn" onclick="newChat()">+ 新建对话</button>
+  </div>
+  <div class="thread-list" id="threadList"></div>
+</div>
+
+<div class="chat-main">
+  <div class="chat-header">
+    <h1 id="chatTitle">开始新对话</h1>
+    <span class="thread-id-badge" id="threadIdBadge">-</span>
+  </div>
+  <div class="messages-container" id="messagesContainer">
+    <div class="empty-state">
+      <div class="empty-state-icon">🤖</div>
+      <div class="empty-state-text">你好，有什么我可以帮你的吗？</div>
+    </div>
+  </div>
+  <div class="input-area">
+    <div class="file-upload-area" id="fileUploadArea">
+      <div class="file-upload-wrapper">
+        <label class="file-upload-btn" for="fileInput" id="fileUploadBtn">
+          📎 上传文件 (CSV, Excel, TXT)
+        </label>
+        <input type="file" id="fileInput" accept=".csv,.xlsx,.xls,.tsv,.txt" style="display:none" onchange="handleFileUpload(event)">
+        <div id="fileChipContainer"></div>
+      </div>
+    </div>
+    <div class="input-wrapper">
+      <textarea
+        class="message-input"
+        id="messageInput"
+        placeholder="输入消息... (Enter 发送，Shift+Enter 换行)"
+        rows="1"
+      ></textarea>
+      <button class="send-btn" id="sendBtn" onclick="sendMessage()">发送</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const STORAGE_KEY = 'ai_chat_current_thread_id';
+  let currentThreadId = localStorage.getItem(STORAGE_KEY) || null;
+  let isLoading = false;
+  let uploadedFile = null;  // { file_id, filename, analysis_type, code }
+
+  const $ = (id) => document.getElementById(id);
+
+  function showToast(msg) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.style.display = 'block';
+    setTimeout(() => t.style.display = 'none', 3000);
+  }
+
+  function saveThreadId(id) {
+    currentThreadId = id;
+    localStorage.setItem(STORAGE_KEY, id);
+  }
+
+  function generateThreadId() {
+    return 'thread-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  }
+
+  async function listThreads() {
+    try {
+      const res = await fetch('/api/threads');
+      if (!res.ok) throw new Error('获取会话列表失败');
+      const data = await res.json();
+      renderThreadList(data);
+      return data;
+    } catch (e) {
+      console.error(e);
+      return [];
+    }
+  }
+
+  function renderThreadList(threads) {
+    const container = $('threadList');
+    container.innerHTML = '';
+
+    if (!threads.length) {
+      container.innerHTML = '<div style="padding:20px;text-align:center;color:#9ca3af;font-size:13px;">暂无历史对话</div>';
+      return;
+    }
+
+    threads.forEach(t => {
+      const item = document.createElement('div');
+      item.className = 'thread-item' + (t.thread_id === currentThreadId ? ' active' : '');
+      item.onclick = (e) => {
+        if (e.target.classList.contains('thread-delete')) return;
+        loadThread(t.thread_id);
+      };
+
+      const preview = t.last_message || '新对话';
+      const title = preview.length > 20 ? preview.slice(0, 20) + '...' : preview;
+
+      item.innerHTML = `
+        <div class="thread-content">
+          <div class="thread-title">${title}</div>
+          <div class="thread-preview">${t.thread_id.slice(0, 20)}...</div>
+        </div>
+        <button class="thread-delete" title="删除对话" onclick="event.stopPropagation(); deleteThread('${t.thread_id}')">✕</button>
+      `;
+      container.appendChild(item);
+    });
+  }
+
+  async function loadThread(threadId) {
+    saveThreadId(threadId);
+    $('threadIdBadge').textContent = threadId.slice(0, 16) + '...';
+
+    try {
+      const res = await fetch(`/api/history/${encodeURIComponent(threadId)}`);
+      if (!res.ok) throw new Error('加载历史失败');
+      const data = await res.json();
+      renderMessages(data.messages);
+      await listThreads();
+    } catch (e) {
+      console.error(e);
+      showToast('加载历史消息失败: ' + e.message);
+    }
+  }
+
+  function newChat() {
+    const newId = generateThreadId();
+    saveThreadId(newId);
+    $('threadIdBadge').textContent = newId.slice(0, 16) + '...';
+    $('chatTitle').textContent = '开始新对话';
+    $('messagesContainer').innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state-icon">🤖</div>
+        <div class="empty-state-text">你好，有什么我可以帮你的吗？</div>
+      </div>
+    `;
+    listThreads();
+  }
+
+  async function deleteThread(threadId) {
+    if (!confirm('确定要删除这个对话吗？')) return;
+    try {
+      const res = await fetch(`/api/threads/${encodeURIComponent(threadId)}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('删除失败');
+      if (threadId === currentThreadId) {
+        localStorage.removeItem(STORAGE_KEY);
+        currentThreadId = null;
+        newChat();
+      } else {
+        await listThreads();
+      }
+    } catch (e) {
+      showToast('删除失败: ' + e.message);
+    }
+  }
+
+  function renderMessages(messages) {
+    const container = $('messagesContainer');
+
+    if (!messages.length) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state-icon">🤖</div>
+          <div class="empty-state-text">对话开始，发送第一条消息吧！</div>
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = '';
+    messages.forEach(m => {
+      if (m.role === 'system') return;
+      appendMessage(m.role, m.content, false, m.reasoning || null);
+    });
+
+    if (messages.length) {
+      const lastUser = [...messages].reverse().find(m => m.role === 'user');
+      if (lastUser) {
+        const title = lastUser.content.length > 30 ? lastUser.content.slice(0, 30) + '...' : lastUser.content;
+        $('chatTitle').textContent = title;
+      }
+    }
+
+    scrollToBottom();
+  }
+
+  function appendMessage(role, content, scroll = true, reasoning = null) {
+    const container = $('messagesContainer');
+
+    const empty = container.querySelector('.empty-state');
+    if (empty) empty.remove();
+
+    const msg = document.createElement('div');
+    msg.className = `message ${role}`;
+    const avatar = role === 'assistant' ? '🤖' : '👤';
+    msg.innerHTML = `
+      <div class="message-avatar">${avatar}</div>
+      <div class="message-bubble"></div>
+    `;
+    const bubble = msg.querySelector('.message-bubble');
+
+    // Render reasoning (thinking) section above the answer for assistant messages
+    if (role === 'assistant' && reasoning && reasoning.trim()) {
+      const reasoningSection = document.createElement('div');
+      reasoningSection.className = 'reasoning-section collapsed';
+      reasoningSection.innerHTML = `
+        <div class="reasoning-header" title="点击展开/收起思考过程">
+          <span class="reasoning-icon">💭</span>
+          <span>思考过程</span>
+          <span class="reasoning-toggle">▼</span>
+        </div>
+        <div class="reasoning-content"></div>
+      `;
+      reasoningSection.querySelector('.reasoning-content').textContent = reasoning;
+      reasoningSection.querySelector('.reasoning-header').addEventListener('click', () => {
+        reasoningSection.classList.toggle('collapsed');
+      });
+      bubble.appendChild(reasoningSection);
+    }
+
+    const answerEl = document.createElement('div');
+    answerEl.className = 'message-answer';
+    answerEl.textContent = content;
+    bubble.appendChild(answerEl);
+
+    container.appendChild(msg);
+    if (scroll) scrollToBottom();
+    return msg;
+  }
+
+  function appendLoading() {
+    const container = $('messagesContainer');
+    const empty = container.querySelector('.empty-state');
+    if (empty) empty.remove();
+
+    const msg = document.createElement('div');
+    msg.className = 'message assistant';
+    msg.id = 'loadingMessage';
+    msg.innerHTML = `
+      <div class="message-avatar">🤖</div>
+      <div class="message-bubble"><div class="loading-dots"><span></span><span></span><span></span></div></div>
+    `;
+    container.appendChild(msg);
+    scrollToBottom();
+  }
+
+  function removeLoading() {
+    const el = $('loadingMessage');
+    if (el) el.remove();
+  }
+
+  function scrollToBottom() {
+    const c = $('messagesContainer');
+    setTimeout(() => c.scrollTop = c.scrollHeight, 30);
+  }
+
+  async function handleFileUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const btn = $('fileUploadBtn');
+    btn.classList.add('loading');
+    btn.textContent = '⏳ 上传中...';
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch('/api/files/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || '上传失败');
+      }
+
+      const data = await res.json();
+      uploadedFile = {
+        file_id: data.file_id,
+        filename: data.filename,
+        file_type: data.file_type,
+        row_count: data.row_count,
+        columns: data.columns,
+        analysis_type: data.analysis_type,
+        code: data.code,
+      };
+
+      renderFileChip();
+      showToast(`文件上传成功: ${data.filename} (${data.row_count}行)`);
+    } catch (e) {
+      showToast('上传失败: ' + e.message);
+    } finally {
+      btn.classList.remove('loading');
+      btn.innerHTML = '📎 上传文件 (CSV, Excel, TXT)';
+      event.target.value = '';
+    }
+  }
+
+  function renderFileChip() {
+    const container = $('fileChipContainer');
+    if (!uploadedFile) {
+      container.innerHTML = '';
+      return;
+    }
+
+    const badge = uploadedFile.analysis_type === 'code_execution'
+      ? '<span class="file-badge">代码执行</span>'
+      : '<span class="file-badge">直接分析</span>';
+
+    container.innerHTML = `
+      <div class="file-chip">
+        📄 ${uploadedFile.filename} ${badge}
+        <span class="file-remove" onclick="removeFile()">✕</span>
+      </div>
+    `;
+  }
+
+  function removeFile() {
+    if (uploadedFile) {
+      fetch(`/api/files/${encodeURIComponent(uploadedFile.file_id)}`, { method: 'DELETE' });
+    }
+    uploadedFile = null;
+    renderFileChip();
+  }
+
+  async function executeSandboxCode(code) {
+    try {
+      const res = await fetch('/api/sandbox/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, timeout: 60 }),
+      });
+      if (!res.ok) throw new Error('代码执行失败');
+      const data = await res.json();
+      return data.output || '无输出';
+    } catch (e) {
+      return '代码执行错误: ' + e.message;
+    }
+  }
+
+  async function sendMessage() {
+    const input = $('messageInput');
+    const btn = $('sendBtn');
+    const text = input.value.trim();
+
+    if (!text || isLoading) return;
+
+    if (!currentThreadId) {
+      newChat();
+    }
+
+    isLoading = true;
+    btn.disabled = true;
+    input.value = '';
+    input.style.height = 'auto';
+
+    let displayText = text;
+    if (uploadedFile) {
+      displayText = `📎 [已上传文件: ${uploadedFile.filename}]\n${text}`;
+    }
+    appendMessage('user', displayText);
+    const assistantMsg = appendMessage('assistant', '');
+    const bubble = assistantMsg.querySelector('.message-bubble');
+    const answerEl = bubble.querySelector('.message-answer');
+
+    try {
+      let finalMessage = text;
+
+      // For large files (code_execution), the agent autonomously writes and
+      // executes code in the sandbox via OpensandboxBackend — no need to
+      // pre-run generic stats code on the frontend.
+      if (uploadedFile && uploadedFile.analysis_type === 'code_execution') {
+        answerEl.textContent = '⏳ 正在分析文件，Agent 将自动编写并执行代码...';
+      }
+
+      const endpoint = uploadedFile ? '/api/chat-with-file' : '/api/chat';
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 180000);
+
+      const body = {
+        message: finalMessage,
+        thread_id: currentThreadId,
+        user_id: 'local-user',
+        org_id: 'default-org',
+      };
+      if (uploadedFile) {
+        body.file_id = uploadedFile.file_id;
+      }
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      if (!res.ok) {
+        let errMsg = '请求失败';
+        try {
+          const err = await res.json();
+          errMsg = err.detail || errMsg;
+        } catch (_) {}
+        throw new Error(errMsg);
+      }
+
+      const data = await res.json();
+
+      // Insert reasoning (thinking) section above the answer when present
+      if (data.reasoning && data.reasoning.trim()) {
+        const existing = bubble.querySelector('.reasoning-section');
+        if (!existing) {
+          const reasoningSection = document.createElement('div');
+          reasoningSection.className = 'reasoning-section collapsed';
+          reasoningSection.innerHTML = `
+            <div class="reasoning-header" title="点击展开/收起思考过程">
+              <span class="reasoning-icon">💭</span>
+              <span>思考过程</span>
+              <span class="reasoning-toggle">▼</span>
+            </div>
+            <div class="reasoning-content"></div>
+          `;
+          reasoningSection.querySelector('.reasoning-content').textContent = data.reasoning;
+          reasoningSection.querySelector('.reasoning-header').addEventListener('click', () => {
+            reasoningSection.classList.toggle('collapsed');
+          });
+          bubble.insertBefore(reasoningSection, answerEl);
+        }
+      }
+
+      if (data.reply) {
+        const reply = data.reply;
+        for (let i = 0; i <= reply.length; i += 2) {
+          answerEl.textContent = reply.slice(0, i);
+          scrollToBottom();
+        }
+        answerEl.textContent = reply;
+      } else {
+        answerEl.textContent = '(无响应)';
+      }
+
+      if (uploadedFile) {
+        removeFile();
+      }
+
+      await listThreads();
+    } catch (e) {
+      console.error(e);
+      let msg = e.message || '未知错误';
+      if (e.name === 'AbortError') {
+        msg = '请求超时，请检查网络或稍后重试';
+      }
+      showToast('发送失败: ' + msg);
+    } finally {
+      isLoading = false;
+      btn.disabled = false;
+      input.focus();
+    }
+  }
+
+  // Auto resize textarea
+  $('messageInput').addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+  });
+
+  // Keyboard shortcuts
+  $('messageInput').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  // Initialize
+  (async function init() {
+    const threads = await listThreads();
+
+    if (currentThreadId) {
+      const exists = threads.some(t => t.thread_id === currentThreadId);
+      if (exists) {
+        await loadThread(currentThreadId);
+        return;
+      } else {
+        localStorage.removeItem(STORAGE_KEY);
+        currentThreadId = null;
+      }
+    }
+
+    if (threads.length > 0) {
+      await loadThread(threads[0].thread_id);
+    }
+  })();
+</script>
+</body>
+</html>
