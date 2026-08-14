@@ -77,11 +77,17 @@ def _provision_sandbox_with_ppt_skill(backend: OpensandboxBackend) -> Tuple[bool
 
     try:
         backend.execute(
-            "python3 -m pip --version >/dev/null 2>&1 || python3 -m ensurepip --upgrade >/dev/null 2>&1 || true",
-            timeout=60,
+            "python3 -m pip --version >/dev/null 2>&1 || "
+            "("
+            "curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py 2>/dev/null "
+            "|| wget -q https://bootstrap.pypa.io/get-pip.py -O /tmp/get-pip.py 2>/dev/null"
+            ") && python3 /tmp/get-pip.py --quiet 2>/dev/null"
+            " || python3 -m ensurepip --upgrade 2>/dev/null"
+            " || true",
+            timeout=120,
         )
         install_res = backend.execute(
-            "python3 -m pip install --quiet --disable-pip-version-check "
+            "python3 -m pip install --quiet --disable-pip-version-check --break-system-packages "
             + " ".join(PPT_CORE_DEPS) + " 2>&1",
             timeout=300,
         )

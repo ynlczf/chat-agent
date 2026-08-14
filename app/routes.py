@@ -91,9 +91,7 @@ def _get_messages_from_state(state: Dict[str, Any]) -> List[MessageItem]:
 def _build_env_footer(org_id: str) -> str:
     return (
         f"\n\n【运行环境】org_id={org_id}；沙箱工作目录 /workspace；"
-        f"PPT skill SKILL_DIR=/skills/ynlczf-pptx-generator（脚本与 python-pptx 依赖已预装到沙箱）。"
-        f"生成 PPT 后，把沙箱中 pptx 的绝对路径填入此格式给出下载链接："
-        f"/api/sandbox/download?org_id={quote(org_id)}&path=<沙箱中pptx绝对路径>"
+        f"技能目录 /skills/。"
     )
 
 

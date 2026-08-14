@@ -42,8 +42,7 @@ AGENTS_MEMORY = """你是一个智能助手，可以通过持续对话学习和�
 
 ## PPT 制作能力（ynlczf-pptx-generator 技能）
 
-你拥有 `ynlczf-pptx-generator` 技能，超轻量化生成极简 PPT 并导出 PPTX。仅依赖 python-pptx，无动画/渐变/复杂图表，适合快速汇报、课堂分享、短演示。
-当用户要求"做PPT/制作演示文稿/生成PPT/create PPT/做幻灯片/极简PPT/轻量化汇报PPT/导出pptx简报"等时，按以下约定执行：
+**重要约束：绝不主动向用户提起、推销或询问是否需要制作 PPT。** 用户可能只是在闲聊、提问或做文件分析，不要主动提及 PPT，也不要主动给出 PPT 相关建议。只有当用户明确表达"做PPT/制作演示文稿/生成PPT/create PPT/做幻灯片/极简PPT/轻量化汇报PPT/导出pptx简报"等意图时，才按以下约定直接执行，无需额外确认：
 
 1. 先用 `read_file` 读取 `/skills/ynlczf-pptx-generator/SKILL.md`（`limit=1000`）了解硬性约束与页面结构。
 2. **两种使用方式**（任选其一，推荐方式一）：
@@ -63,7 +62,8 @@ AGENTS_MEMORY = """你是一个智能助手，可以通过持续对话学习和�
    - 运行脚本用 `execute` 工具（当前组织沙箱，Linux 环境，`python3` 命令）
    - 核心依赖 `python-pptx` 已预装到沙箱
    - 输出文件保存到沙箱 `/workspace/` 目录下（绝对路径）
-4. 生成 PPTX 后，将沙箱中 pptx 的绝对路径填入下载链接格式（见每条消息末尾的【运行环境】），把可点击的下载链接返回给用户。
+4. 生成 PPTX 后，将沙箱中 pptx 的绝对路径填入下载链接格式，把可点击的下载链接返回给用户：
+   `/api/sandbox/download?org_id=<消息末尾【运行环境】中的org_id>&path=<沙箱中pptx绝对路径>`
 5. 如遇到依赖缺失，可用 `execute` 运行 `python3 -m pip install python-pptx` 补装后重试。
 6. 若沙箱刚创建、脚本尚未预装完成导致首次执行失败，等待几秒后重试即可。
 """
@@ -111,15 +111,19 @@ class _GlobalAgentsStore:
 
 
 def _ensure_agents_memory(store: PostgresStore):
-    """确保全局 AGENTS.md（系统提示词配置）已存在，不存在则写入。"""
+    """确保全局 AGENTS.md（系统提示词配置）已存在且为当前版本，内容不一致时更新。"""
+    current = {"content": AGENTS_MEMORY, "encoding": "utf-8"}
     existing = store.get(AGENTS_NAMESPACE, AGENTS_KEY)
     if existing:
+        value = getattr(existing, "value", None) or {}
+        stored_content = value.get("content") if isinstance(value, dict) else None
+        if stored_content == AGENTS_MEMORY:
+            return
+        logger.info("Global /AGENTS.md differs from current version, updating.")
+        store.put(AGENTS_NAMESPACE, AGENTS_KEY, current)
         return
 
-    store.put(AGENTS_NAMESPACE, AGENTS_KEY, {
-        "content": AGENTS_MEMORY,
-        "encoding": "utf-8",
-    })
+    store.put(AGENTS_NAMESPACE, AGENTS_KEY, current)
     logger.info("Created global /AGENTS.md")
 
 
