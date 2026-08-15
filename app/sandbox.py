@@ -79,10 +79,13 @@ def _provision_sandbox_with_ppt_skill(backend: OpensandboxBackend) -> Tuple[bool
         backend.execute(
             "python3 -m pip --version >/dev/null 2>&1 || "
             "("
+            "apt-get update -qq && apt-get install -y -qq python3-pip >/dev/null 2>&1"
+            ") || "
+            "("
             "curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py 2>/dev/null "
             "|| wget -q https://bootstrap.pypa.io/get-pip.py -O /tmp/get-pip.py 2>/dev/null"
-            ") && python3 /tmp/get-pip.py --quiet 2>/dev/null"
-            " || python3 -m ensurepip --upgrade 2>/dev/null"
+            ") && python3 /tmp/get-pip.py --quiet --break-system-packages 2>/dev/null"
+            " || python3 -m ensurepip --upgrade --break-system-packages 2>/dev/null"
             " || true",
             timeout=120,
         )
