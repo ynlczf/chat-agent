@@ -3,11 +3,40 @@ from typing import Optional, List
 from pydantic import BaseModel
 
 
+# ---------------------------------------------------------------------------
+# Auth models
+# ---------------------------------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    org_id: Optional[str] = None  # 可选，默认用 username 生成
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    user_id: str
+    username: str
+    org_id: str
+    created_at: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: UserResponse
+
+
+# ---------------------------------------------------------------------------
+# Chat models
+# ---------------------------------------------------------------------------
+
 class ChatRequest(BaseModel):
     message: str
     thread_id: str = "default-thread"
-    user_id: str = "local-user"
-    org_id: str = "default-org"
 
 
 class MessageItem(BaseModel):
@@ -42,6 +71,4 @@ class FileAnalysisResponse(BaseModel):
 class ChatWithFileRequest(BaseModel):
     message: str
     thread_id: str = "default-thread"
-    user_id: str = "local-user"
-    org_id: str = "default-org"
     file_id: Optional[str] = None

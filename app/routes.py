@@ -17,7 +17,7 @@ from .config import SANDBOX_IMAGE
 from .context_type import MemoryContext
 from .models import (
     ChatRequest, MessageItem, ChatHistoryResponse, ThreadInfo,
-    FileAnalysisResponse, ChatWithFileRequest,
+    FileAnalysisResponse, ChatWithFileRequest, UserResponse,
 )
 from .sandbox import (
     _set_current_org, _get_current_org, _sandbox_available,
@@ -42,6 +42,23 @@ def set_globals(store: PostgresStore, checkpointer: PostgresSaver, agent: Any):
     _store = store
     _checkpointer = checkpointer
     _agent = agent
+
+
+# ---------------------------------------------------------------------------
+# Auth helpers: pull identity from request.state.user (set by middleware),
+# fall back to legacy body/query params for backward-compat with dev tooling.
+# ---------------------------------------------------------------------------
+
+def _resolve_identity(request: Request, body_data: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+    """Return (user_id, org_id). Auth user wins; else use body/query defaults."""
+    user: Optional[UserResponse] = getattr(request.state, "user", None)
+    if user is not None:
+        return user.user_id, user.org_id
+    # Legacy fallback for dev without auth
+    body_data = body_data or {}
+    user_id = body_data.get("user_id") or request.query_params.get("user_id") or "local-user"
+    org_id = body_data.get("org_id") or request.query_params.get("org_id") or "default-org"
+    return user_id, org_id
 
 
 def _extract_reasoning_and_content(message: Any) -> Tuple[str, Optional[str]]:
@@ -610,8 +627,7 @@ async def chat(request: Request):
         data = json.loads(body) if body else {}
         message = data.get("message", "")
         thread_id = data.get("thread_id", "default-thread")
-        user_id = data.get("user_id", "local-user")
-        org_id = data.get("org_id", "default-org")
+        user_id, org_id = _resolve_identity(request, data)
 
         result = await asyncio.wait_for(
             asyncio.to_thread(_sync_chat, message, thread_id, user_id, org_id),
@@ -633,10 +649,17 @@ async def chat(request: Request):
 
 
 @router.post("/files/upload", response_model=FileAnalysisResponse)
-async def upload_file(file: UploadFile = File(...), org_id: str = Form("default-org")):
+async def upload_file(request: Request, file: UploadFile = File(...), org_id_form: Optional[str] = Form(None)):
     if not _agent:
         raise HTTPException(status_code=500, detail="Agent not initialized")
     try:
+        # 身份优先从 token 取；否则从 Form 字段兼容
+        user, _org = getattr(request.state, "user", None), None
+        if user is not None:
+            org_id = user.org_id
+        else:
+            org_id = org_id_form or "default-org"
+
         content = await file.read()
         file_id = f"file_{asyncio.get_event_loop().time():.0f}"
 
@@ -664,8 +687,7 @@ async def chat_with_file(request: Request):
         data = json.loads(body) if body else {}
         message = data.get("message", "")
         thread_id = data.get("thread_id", "default-thread")
-        user_id = data.get("user_id", "local-user")
-        org_id = data.get("org_id", "default-org")
+        user_id, org_id = _resolve_identity(request, data)
         file_id = data.get("file_id")
 
         result = await asyncio.wait_for(
@@ -703,8 +725,7 @@ async def chat_stream(request: Request):
     data = json.loads(body) if body else {}
     message = data.get("message", "")
     thread_id = data.get("thread_id", "default-thread")
-    user_id = data.get("user_id", "local-user")
-    org_id = data.get("org_id", "default-org")
+    user_id, org_id = _resolve_identity(request, data)
     if not message.strip():
         raise HTTPException(status_code=400, detail="消息内容不能为空")
 
@@ -726,8 +747,7 @@ async def chat_with_file_stream(request: Request):
     data = json.loads(body) if body else {}
     message = data.get("message", "")
     thread_id = data.get("thread_id", "default-thread")
-    user_id = data.get("user_id", "local-user")
-    org_id = data.get("org_id", "default-org")
+    user_id, org_id = _resolve_identity(request, data)
     file_id = data.get("file_id")
     if not message.strip():
         raise HTTPException(status_code=400, detail="消息内容不能为空")
@@ -751,7 +771,7 @@ async def execute_code(request: Request):
         data = json.loads(body) if body else {}
         code = data.get("code", "")
         timeout = data.get("timeout", 60)
-        org_id = data.get("org_id", "default-org")
+        _, org_id = _resolve_identity(request, data)
 
         result = await asyncio.wait_for(
             asyncio.to_thread(_sync_execute_code, code, timeout, org_id),
@@ -769,8 +789,14 @@ async def execute_code(request: Request):
 
 
 @router.get("/sandbox/download")
-async def sandbox_download(org_id: str, path: str):
+async def sandbox_download(request: Request, path: str):
     from fastapi.responses import Response
+    # org_id from token wins; fallback to query param for legacy
+    user = getattr(request.state, "user", None)
+    if user is not None:
+        org_id = user.org_id
+    else:
+        org_id = request.query_params.get("org_id") or "default-org"
     content = await asyncio.to_thread(_sync_download_sandbox_file, org_id, path)
     if content is None:
         raise HTTPException(status_code=404, detail="File not found or sandbox unavailable")
@@ -799,7 +825,13 @@ async def get_history(thread_id: str):
 
 
 @router.get("/threads", response_model=List[ThreadInfo])
-async def list_threads(org_id: Optional[str] = None, user_id: Optional[str] = None):
+async def list_threads(request: Request):
+    user = getattr(request.state, "user", None)
+    if user is not None:
+        org_id, user_id = user.org_id, user.user_id
+    else:
+        org_id = request.query_params.get("org_id") or None
+        user_id = request.query_params.get("user_id") or None
     return await asyncio.to_thread(_sync_list_threads, org_id, user_id)
 
 

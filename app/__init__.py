@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from dotenv import load_dotenv
@@ -28,6 +28,13 @@ _agent: Any = None
 async def lifespan(app: FastAPI):
     global _store, _checkpointer, _agent
     logger.info("Initializing database connections...")
+
+    # Ensure auth tables exist before anything else touches Postgres
+    try:
+        from .auth import ensure_tables
+        ensure_tables()
+    except Exception as e:
+        logger.warning(f"Auth table init failed (non-fatal): {e}")
 
     from contextlib import ExitStack
     from langgraph.store.postgres import PostgresStore
@@ -88,7 +95,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """Populate request.state.user from Bearer token on every request.
+    Non-fatal: bad/missing token leaves user = None; individual endpoints
+    that require auth can check for it."""
+    from .auth import inject_user_to_request
+    try:
+        inject_user_to_request(request)
+    except Exception as e:
+        logger.debug(f"Auth middleware soft-fail: {e}")
+        request.state.user = None
+    response = await call_next(request)
+    return response
+
+
+# API routers
 app.include_router(router, prefix="/api")
+
+from .auth import router as auth_router
+app.include_router(auth_router, prefix="/api")
 
 
 @app.get("/")
