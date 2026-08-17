@@ -3,12 +3,14 @@ name = "testttt"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "bcrypt>=5.0.0",
     "deepagents>=0.7.5",
     "deepagents-opensandbox>=1.0.2",
     "fastapi>=0.141.1",
     "langchain-core>=1.5.4",
     "langchain-deepseek>=1.1.0",
     "langgraph-checkpoint-postgres>=3.1.2",
+    "openpyxl>=3.1.5",
     "opensandbox>=0.1.15",
     "pandas>=3.0.5",
     "psycopg[binary,pool]>=3.3.4",
